@@ -15,8 +15,8 @@ void main() async {
  WidgetsFlutterBinding.ensureInitialized();
 
  // --- Load API Keys (keep as before) ---
- const geminiApiKey = String.fromEnvironment('GEMINI_API_KEY', defaultValue: 'AIzaSyCdbgTAAnOraRwg-UVpFfpOTpVzT');
- const openaiApiKey = String.fromEnvironment('OPENAI_API_KEY', defaultValue: 'aa-UYSYGB3RR5enQDwXZUqXfQEiwlq9SdR38KKOBlbIwG');
+ const geminiApiKey = String.fromEnvironment('GEMINI_API_KEY', defaultValue: '');
+ const openaiApiKey = String.fromEnvironment('OPENAI_API_KEY', defaultValue: '');
  if (geminiApiKey.isEmpty) { /* ... error print ... */ }
  if (openaiApiKey.isEmpty) { /* ... warning print ... */ }
 
