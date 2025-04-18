@@ -4,6 +4,9 @@ import 'package:flutter/foundation.dart';
 import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
+import 'package:json_schema/json_schema.dart'
+    as json_schema; // Use prefix for json_schema
+import '../constants.dart' as constants; // Use constants
 
 const _customToolsKey = 'custom_function_tools';
 var _uuid = Uuid();
@@ -23,67 +26,82 @@ class CustomToolData {
   });
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'name': name,
-        'description': description,
-        'schemaJson': schemaJson,
-      };
+    'id': id,
+    'name': name,
+    'description': description,
+    'schemaJson': schemaJson,
+  };
 
   factory CustomToolData.fromJson(Map<String, dynamic> json) => CustomToolData(
-        id: json['id'] ?? _uuid.v4(), // Assign new ID if missing
-        name: json['name'] ?? 'Untitled Tool',
-        description: json['description'] ?? '',
-        schemaJson: json['schemaJson'] ?? '{}', // Default to empty JSON object
-      );
+    id: json['id'] ?? _uuid.v4(), // Assign new ID if missing
+    name: json['name'] ?? 'Untitled Tool',
+    description: json['description'] ?? '',
+    schemaJson: json['schemaJson'] ?? '{}', // Default to empty JSON object
+  );
 
-  // Attempt to convert the stored JSON string into a FunctionDeclaration
   FunctionDeclaration? toFunctionDeclaration() {
     try {
       final schemaMap = jsonDecode(schemaJson);
       if (schemaMap is Map<String, dynamic>) {
-        // Basic validation/parsing - needs improvement for real scenarios
-        final typeString = schemaMap['type'] as String?;
-         final propertiesMap = schemaMap['properties'] as Map<String, dynamic>?;
-         final requiredList = (schemaMap['required'] as List<dynamic>?)?.map((e) => e.toString()).toList();
-         final itemsMap = schemaMap['items'] as Map<String, dynamic>?; // For arrays
-
-        SchemaType schemaType;
-        // Very basic type mapping - enhance as needed
-        switch(typeString?.toUpperCase()) {
-            case 'OBJECT': schemaType = SchemaType.object; break;
-            case 'ARRAY': schemaType = SchemaType.array; break;
-            case 'STRING': schemaType = SchemaType.string; break;
-            case 'NUMBER': schemaType = SchemaType.number; break;
-            case 'INTEGER': schemaType = SchemaType.integer; break;
-            case 'BOOLEAN': schemaType = SchemaType.boolean; break;
-            default: schemaType = SchemaType.object; // Default or throw error?
+        // Helper to parse SchemaType safely
+        SchemaType parseSchemaType(String? typeString) {
+          switch (typeString?.toUpperCase()) {
+            case 'OBJECT':
+              return SchemaType.object;
+            case 'ARRAY':
+              return SchemaType.array;
+            case 'STRING':
+              return SchemaType.string;
+            case 'NUMBER':
+              return SchemaType.number;
+            case 'INTEGER':
+              return SchemaType.integer;
+            case 'BOOLEAN':
+              return SchemaType.boolean;
+            default:
+              if (kDebugMode)
+                print(
+                  "Warning: Unknown schema type '$typeString' for tool '$name'. Defaulting to STRING.",
+                );
+              return SchemaType.string;
+          }
         }
 
-        // Recursive schema parsing is complex. This is a simplified version.
-        // It assumes properties are simple types for now.
+        // Helper to parse individual property schemas (basic)
+        Schema parsePropertySchema(dynamic propValue) {
+          if (propValue is Map<String, dynamic>) {
+            final propType = parseSchemaType(propValue['type'] as String?);
+            final propDesc = propValue['description'] as String?;
+            final propEnum =
+                (propValue['enum'] as List<dynamic>?)
+                    ?.map((e) => e.toString())
+                    .toList();
+            return Schema(
+              propType,
+              description: propDesc,
+              enumValues: propEnum,
+            );
+          }
+          if (kDebugMode)
+            print(
+              "Warning: Malformed property schema for tool '$name': $propValue. Defaulting to STRING.",
+            );
+          return Schema(SchemaType.string);
+        }
+
+        final schemaType = parseSchemaType(schemaMap['type'] as String?);
+        final propertiesMap = schemaMap['properties'] as Map<String, dynamic>?;
+        final requiredList =
+            (schemaMap['required'] as List<dynamic>?)
+                ?.map((e) => e.toString())
+                .toList();
+
         Map<String, Schema>? properties;
         if (propertiesMap != null) {
-            properties = propertiesMap.map((key, value) {
-                 // TODO: Recursively parse nested schemas if needed
-                SchemaType propType = SchemaType.string; // Default
-                String? propTypeStr = (value as Map<String,dynamic>?)?['type']?.toString().toUpperCase();
-                 switch(propTypeStr) {
-                    case 'STRING': propType = SchemaType.string; break;
-                    case 'NUMBER': propType = SchemaType.number; break;
-                    case 'INTEGER': propType = SchemaType.integer; break;
-                    case 'BOOLEAN': propType = SchemaType.boolean; break;
-                    // Add array, object etc. if needed
-                 }
-                return MapEntry(key, Schema(propType, description: (value)?['description']?.toString()));
-            });
+          properties = propertiesMap.map(
+            (key, value) => MapEntry(key, parsePropertySchema(value)),
+          );
         }
-
-        Schema? itemsSchema;
-         if (itemsMap != null && schemaType == SchemaType.array){
-            // TODO: Parse items schema similarly to properties
-             itemsSchema = Schema(SchemaType.string); // Placeholder
-         }
-
 
         return FunctionDeclaration(
           name,
@@ -92,18 +110,18 @@ class CustomToolData {
             schemaType,
             properties: properties,
             requiredProperties: requiredList,
-            items: itemsSchema, // Add if type is array
-            // description: schemaMap['description'] // Top-level schema description
+            description: schemaMap['description'] as String?,
           ),
         );
       }
       return null;
-    } catch (e) {
+    } catch (e, s) {
       if (kDebugMode) {
-        print("Error parsing tool '$name' schema: $e");
+        print("Error parsing tool '$name' schema to FunctionDeclaration: $e");
+        print("Stack trace: $s");
         print("Schema JSON was: $schemaJson");
       }
-      return null; // Return null if parsing fails
+      return null;
     }
   }
 }
@@ -114,11 +132,10 @@ class CustomToolService with ChangeNotifier {
 
   List<CustomToolData> get customTools => _customTools;
 
-  // Provides the list of valid FunctionDeclarations for the Gemini model
   List<FunctionDeclaration> get functionDeclarations {
     return _customTools
         .map((data) => data.toFunctionDeclaration())
-        .where((decl) => decl != null) // Filter out tools with invalid schemas
+        .where((decl) => decl != null)
         .cast<FunctionDeclaration>()
         .toList();
   }
@@ -134,17 +151,23 @@ class CustomToolService with ChangeNotifier {
 
   Future<void> loadTools() async {
     if (_prefs == null) await _init();
-    final String? toolsJson = _prefs!.getString(_customToolsKey);
+    final String? toolsJson = _prefs!.getString(constants.prefsCustomToolsKey);
     if (toolsJson != null) {
       try {
         final List<dynamic> decodedList = jsonDecode(toolsJson);
-        _customTools = decodedList
-            .map((item) => CustomToolData.fromJson(item as Map<String, dynamic>))
-            .toList();
-      } catch (e) {
-         if (kDebugMode) {
-           print("Error loading custom tools: $e");
-         }
+        _customTools =
+            decodedList
+                .map(
+                  (item) =>
+                      CustomToolData.fromJson(item as Map<String, dynamic>),
+                )
+                .toList();
+      } catch (e, s) {
+        if (kDebugMode) {
+          print("Error loading/decoding custom tools: $e");
+          print("Stack trace: $s");
+          print("Corrupted JSON string: $toolsJson");
+        }
         _customTools = [];
       }
     } else {
@@ -155,71 +178,197 @@ class CustomToolService with ChangeNotifier {
 
   Future<void> _saveTools() async {
     if (_prefs == null) return;
-    final String toolsJson = jsonEncode(_customTools.map((e) => e.toJson()).toList());
-    await _prefs!.setString(_customToolsKey, toolsJson);
-    notifyListeners(); // Crucial: Notify after any change
+    final String toolsJson = jsonEncode(
+      _customTools.map((e) => e.toJson()).toList(),
+    );
+    await _prefs!.setString(constants.prefsCustomToolsKey, toolsJson);
+    notifyListeners();
   }
 
-  Future<void> addTool(String name, String description, String schemaJson) async {
-     if (name.isEmpty || description.isEmpty) return; // Basic validation
-      // Add basic JSON validation if possible before adding
-      try {
-        jsonDecode(schemaJson); // Test if it's valid JSON
-      } catch (_) {
-        // Optionally show an error to the user
-        print("Invalid Schema JSON provided for tool '$name'");
-        return;
+  Future<bool> _validateSchemaJson(String schemaJson, String toolName) async {
+    try {
+      final decodedSchema = jsonDecode(schemaJson);
+      if (decodedSchema is! Map<String, dynamic>) {
+        print(
+          "Validation Error for '$toolName': Schema JSON must be a JSON object (Map).",
+        );
+        return false;
       }
-
-      final newTool = CustomToolData(
-        id: _uuid.v4(),
-        name: name,
-        description: description,
-        schemaJson: schemaJson,
+      final schema = json_schema.JsonSchema.create(decodedSchema);
+      var validationResult = schema.validate(decodedSchema);
+      if (!validationResult.isValid) {
+        print(
+          "Validation Error for '$toolName': Schema is invalid according to OpenAPI spec.",
+        );
+        validationResult.errors.forEach(
+          (error) => print(" - ${error.message} at ${error.instancePath}"),
+        );
+        return false;
+      }
+      print("Schema for '$toolName' validated successfully.");
+      return true;
+    } catch (e) {
+      print(
+        "Validation Error for '$toolName': Invalid JSON format or schema structure: $e",
       );
-      _customTools.add(newTool);
+      return false;
+    }
+  }
+
+  Future<bool> addTool(
+    String name,
+    String description,
+    String schemaJson,
+  ) async {
+    if (name.isEmpty || description.isEmpty) {
+      print("Error adding tool: Name and description cannot be empty.");
+      return false;
+    }
+    if (!await _validateSchemaJson(schemaJson, name)) {
+      return false;
+    }
+
+    final newTool = CustomToolData(
+      id: _uuid.v4(),
+      name: name.trim(),
+      description: description.trim(),
+      schemaJson: schemaJson,
+    );
+    _customTools.add(newTool);
+    await _saveTools();
+    return true;
+  }
+
+  Future<bool> updateTool(CustomToolData toolToUpdate) async {
+    if (toolToUpdate.name.isEmpty || toolToUpdate.description.isEmpty) {
+      print("Error updating tool: Name and description cannot be empty.");
+      return false;
+    }
+    if (!await _validateSchemaJson(
+      toolToUpdate.schemaJson,
+      toolToUpdate.name,
+    )) {
+      return false;
+    }
+
+    int index = _customTools.indexWhere((tool) => tool.id == toolToUpdate.id);
+    if (index != -1) {
+      _customTools[index] = toolToUpdate;
       await _saveTools();
+      return true;
+    } else {
+      print("Error updating tool: Tool with ID ${toolToUpdate.id} not found.");
+      return false;
+    }
   }
-
-    Future<void> updateTool(CustomToolData toolToUpdate) async {
-     if (toolToUpdate.name.isEmpty || toolToUpdate.description.isEmpty) return;
-     try {
-        jsonDecode(toolToUpdate.schemaJson); // Validate JSON
-      } catch (_) {
-         print("Invalid Schema JSON provided for updating tool '${toolToUpdate.name}'");
-         return;
-      }
-
-     int index = _customTools.indexWhere((tool) => tool.id == toolToUpdate.id);
-      if (index != -1) {
-        _customTools[index] = toolToUpdate;
-        await _saveTools();
-     }
-  }
-
 
   Future<void> deleteTool(String id) async {
     _customTools.removeWhere((tool) => tool.id == id);
     await _saveTools();
   }
 
-  // --- Placeholder for actual tool execution logic ---
-  // In a real app, this might call APIs, run local code, etc.
-  // For now, it just returns a placeholder response.
-  Future<Map<String, dynamic>> executeCustomTool(String toolName, Map<String, dynamic> args) async {
-     if (kDebugMode) {
-       print("--- Attempting to execute custom tool ---");
-       print("Tool Name: $toolName");
-       print("Arguments: $args");
-       print("--- End Tool Execution Attempt ---");
-     }
+  Future<Map<String, dynamic>> executeCustomTool(
+    String toolName,
+    Map<String, dynamic> args,
+  ) async {
+    if (kDebugMode) {
+      print("--- Executing Custom Tool ---");
+      print("Tool Name: $toolName");
+      print("Arguments: $args");
+    }
 
-    // TODO: Implement actual logic for custom tools based on toolName
-    // This is where you'd integrate with external APIs, local functions, etc.
+    try {
+      switch (toolName) {
+        case 'get_current_weather':
+          return await _executeGetWeather(args);
 
-    // Simulate execution with a generic success response
-    await Future.delayed(Duration(milliseconds: 500)); // Simulate work
-    return {'status': 'Success', 'message': 'Custom tool $toolName executed (simulated).', 'args_received': args};
+        case 'send_simple_email':
+          return await _executeSendEmail(args);
+
+        default:
+          print("Error: Attempted to execute unknown custom tool '$toolName'");
+          return {
+            'status': 'Error',
+            'message': "The custom tool '$toolName' is not implemented.",
+          };
+      }
+    } catch (e, s) {
+      print("Critical Error during custom tool execution '$toolName': $e");
+      print("Stack Trace: $s");
+      return {
+        'status': 'Error',
+        'message':
+            "An unexpected error occurred while executing the tool '$toolName'.",
+      };
+    } finally {
+      if (kDebugMode) print("--- Finished Custom Tool Execution ---");
+    }
   }
 
+  Future<Map<String, dynamic>> _executeGetWeather(
+    Map<String, dynamic> args,
+  ) async {
+    final location = args['location'] as String?;
+    final unit = args['unit'] as String? ?? 'celsius';
+
+    if (location == null || location.isEmpty) {
+      return {
+        'status': 'Error',
+        'message':
+            "Missing required argument 'location' for get_current_weather.",
+      };
+    }
+
+    try {
+      print("Simulating weather API call for location: $location, unit: $unit");
+      await Future.delayed(Duration(seconds: 1));
+
+      final weatherData = {
+        'location': location,
+        'temperature': unit == 'celsius' ? 25 : 77,
+        'unit': unit,
+        'condition': 'Sunny',
+        'humidity': '60%',
+      };
+      return {'status': 'Success', 'data': weatherData};
+    } catch (e) {
+      print("Error calling weather API: $e");
+      return {
+        'status': 'Error',
+        'message': "Failed to retrieve weather for '$location'.",
+      };
+    }
+  }
+
+  Future<Map<String, dynamic>> _executeSendEmail(
+    Map<String, dynamic> args,
+  ) async {
+    final recipient = args['recipient'] as String?;
+    final subject = args['subject'] as String?;
+    final body = args['body'] as String?;
+
+    if (recipient == null || subject == null || body == null) {
+      return {
+        'status': 'Error',
+        'message':
+            'Missing required arguments (recipient, subject, body) for send_simple_email.',
+      };
+    }
+
+    try {
+      print("Simulating sending email to: $recipient, Subject: $subject");
+      await Future.delayed(Duration(milliseconds: 500));
+
+      return {
+        'status': 'Success',
+        'data': 'Email queued for sending to $recipient.',
+      };
+    } catch (e) {
+      print("Error sending email: $e");
+      return {
+        'status': 'Error',
+        'message': 'Failed to send email to $recipient.',
+      };
+    }
+  }
 }
